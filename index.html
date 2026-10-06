@@ -2222,9 +2222,10 @@ let INVENTORY_ERROR = null;
   document.getElementById('lastUpdate').textContent = 'Snapshot estático generado el ' + SNAPSHOT_DATE;
   document.getElementById('snapshotDate').textContent = SNAPSHOT_DATE;
 
-  // ---------------- Conexión en vivo (Google Apps Script) ----------------
+  // ---------------- Conexión en vivo (Sheets API v4) ----------------
+  const SHEETS_API_KEY = 'AIzaSyBn7UTG5TvUPTFlWuYdajqA9AnuRwSqNaM';
+  const SHEET_ID = '160JEEWCAWSdZAWj6-GhziJQD5oBBCqHbOiElPYjzN18';
   const LS_KEY = 'ventasPrebianApiUrl';
-  const DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbwXYE5jA2z8yME7RhZ9FZ5FNg0x5crQiExThb41TE5gzN1JsY7RNz9m4IFvcMw7Tc68Fw/exec';
   const statusEl = document.getElementById('liveStatus');
   const apiInput = document.getElementById('apiUrlInput');
   const connectBtn = document.getElementById('connectBtn');
@@ -2235,10 +2236,77 @@ let INVENTORY_ERROR = null;
     statusEl.className = 'live-status' + (mode ? ' ' + mode : '');
   }
 
+  function norm_(v){ return String(v==null?'':v).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim(); }
+  function num_(v){ if(v===''||v==null) return 0; if(typeof v==='number') return v; var n=parseFloat(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n)?0:n; }
+  function fecha_(v){
+    if(!v) return '';
+    var s = String(v).trim();
+    var iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if(iso) return parseInt(iso[3],10)+'/'+parseInt(iso[2],10)+'/'+parseInt(iso[1],10);
+    return s;
+  }
+
+  function parseSheetRows(values){
+    if(!values||values.length<2) return [];
+    var header = values[0].map(function(h){ return norm_(h); });
+    var rows = [];
+    for(var i=1;i<values.length;i++){
+      var row = values[i];
+      var obj = {};
+      header.forEach(function(h,j){ obj[h] = row[j]!==undefined ? row[j] : ''; });
+      rows.push(obj);
+    }
+    return rows;
+  }
+
+  function buildChannelRows(parsed){
+    // Busca encabezado "canal de venta" dinámicamente
+    return parsed
+      .filter(function(r){ return r['canal de venta'] && r['fecha']; })
+      .map(function(r){
+        return {
+          canal: String(r['canal de venta']).trim(),
+          ventas: num_(r['ventas mxn']),
+          fecha: fecha_(r['fecha']),
+          bt450: num_(r['bt450']),
+          bt150: num_(r['bt150']),
+          unidades: num_(r['unidades'])
+        };
+      })
+      .filter(function(r){ return r.ventas>0||r.unidades>0; });
+  }
+
+  function buildMonthlySummary(channelRows){
+    var byFecha={}, order=[];
+    channelRows.forEach(function(r){
+      if(!byFecha[r.fecha]){ byFecha[r.fecha]={fecha:r.fecha,ventas:0,bt450:0,bt150:0}; order.push(r.fecha); }
+      byFecha[r.fecha].ventas+=r.ventas;
+      byFecha[r.fecha].bt450+=r.bt450;
+      byFecha[r.fecha].bt150+=r.bt150;
+    });
+    return order.map(function(f){ return byFecha[f]; });
+  }
+
+  function buildCanalesRows(parsed){
+    // Ventas Canales: Canal | Month | Product title | Shipping city | Shipping region | Net items sold
+    return parsed
+      .filter(function(r){ return r['canal']||r['canal de venta']; })
+      .map(function(r){
+        return {
+          canal: String(r['canal']||r['canal de venta']||'').trim(),
+          month: String(r['month']||r['mes']||'').trim(),
+          product: String(r['product title']||r['producto']||'').trim(),
+          city: String(r['shipping city']||r['ciudad']||'').trim(),
+          region: String(r['shipping region']||r['estado']||'').trim(),
+          units: num_(r['net items sold']||r['articulos netos vendidos']||r['unidades']||0)
+        };
+      })
+      .filter(function(r){ return r.units>0; });
+  }
+
   async function fetchLive(url, silent){
     if(!silent) setStatus('Conectando…');
-    // Dentro de Apps Script (servido como HTML Service) usamos
-    // google.script.run — mismo origen, sin fetch ni CORS.
+    // Dentro de Apps Script (servido como HTML Service) usamos google.script.run
     if(window.google && google.script && google.script.run){
       google.script.run
         .withSuccessHandler(json => handleLiveResult(json))
@@ -2246,11 +2314,28 @@ let INVENTORY_ERROR = null;
         .getDashboardData();
       return;
     }
+    // Fuera de Apps Script: leer directamente con Sheets API v4
     try{
-      const res = await fetch(url, {method:'GET'});
-      if(!res.ok) throw new Error('HTTP ' + res.status);
-      const json = await res.json();
-      handleLiveResult(json);
+      const base = 'https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID + '/values/';
+      const key = '?key=' + SHEETS_API_KEY;
+      const [r1, r2] = await Promise.all([
+        fetch(base + encodeURIComponent('Ventas Prebian') + key).then(r=>r.json()),
+        fetch(base + encodeURIComponent('Ventas Canales') + key).then(r=>r.json())
+      ]);
+      if(r1.error) throw new Error('Ventas Prebian: ' + r1.error.message);
+      const channelRows = buildChannelRows(parseSheetRows(r1.values||[]));
+      if(!channelRows.length) throw new Error('Sin filas en Ventas Prebian');
+      const monthlySeries = buildMonthlySummary(channelRows);
+      const canalesRows = r2.error ? [] : buildCanalesRows(parseSheetRows(r2.values||[]));
+      handleLiveResult({
+        ok: true,
+        updatedAt: new Date().toISOString(),
+        channelRows,
+        monthlySeries,
+        canalesRows,
+        inventoryRows: [],
+        inventoryError: null
+      });
     }catch(err){
       setStatus('No se pudo conectar (' + err.message + '). Mostrando datos estáticos.', 'err');
     }
