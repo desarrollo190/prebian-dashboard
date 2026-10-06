@@ -2289,19 +2289,26 @@ let INVENTORY_ERROR = null;
 
   function buildCanalesRows(parsed){
     // Ventas Canales: Canal | Month | Product title | Shipping city | Shipping region | Net items sold
+    // Nombres de campo alineados con los que usa renderCanales(): canal, fecha, producto, ciudad, estado, unidades
     return parsed
       .filter(function(r){ return r['canal']||r['canal de venta']; })
       .map(function(r){
+        var rawMonth = String(r['month']||r['mes']||'').trim();
+        // Convertir "2026-01-01" → "1/1/2026" para que parseFecha() lo entienda
+        var isoMatch = rawMonth.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        var fecha = isoMatch
+          ? parseInt(isoMatch[3],10)+'/'+parseInt(isoMatch[2],10)+'/'+parseInt(isoMatch[1],10)
+          : rawMonth;
         return {
           canal: String(r['canal']||r['canal de venta']||'').trim(),
-          month: String(r['month']||r['mes']||'').trim(),
-          product: String(r['product title']||r['producto']||'').trim(),
-          city: String(r['shipping city']||r['ciudad']||'').trim(),
-          region: String(r['shipping region']||r['estado']||'').trim(),
-          units: num_(r['net items sold']||r['articulos netos vendidos']||r['unidades']||0)
+          fecha: fecha,
+          producto: String(r['product title']||r['producto']||'').trim(),
+          ciudad: String(r['shipping city']||r['ciudad']||'').trim(),
+          estado: String(r['shipping region']||r['estado']||'').trim(),
+          unidades: num_(r['net items sold']||r['articulos netos vendidos']||r['unidades']||0)
         };
       })
-      .filter(function(r){ return r.units>0; });
+      .filter(function(r){ return r.unidades>0; });
   }
 
   async function fetchLive(url, silent){
